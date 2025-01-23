@@ -1,6 +1,10 @@
 from abc import abstractmethod
+from datetime import datetime
 import hashlib
+from numbers import Number
 from pathlib import Path
+import re
+from typing import Any, Sequence
 import warnings
 
 
@@ -56,35 +60,373 @@ class APICFrame:
 
 
 class VorbisComment:
-    # https://www.xiph.org/vorbis/doc/v-comment.html
+    """
+    Vorbis comment object.
 
-    def __init__(self, data: bytes | dict, /,) -> None:
-        if isinstance(data, bytes):
-            self._vendor = data[4:(byte_offset := 4 + int.from_bytes(data[:4], byteorder="little"))].decode()
-            self._n_fields = int.from_bytes(data[byte_offset:(byte_offset := byte_offset + 4)], byteorder="little")
+    .. seealso::
 
+        For more information, see `Ogg Vorbis I format specification:
+        comment field and header specification
+        <https://www.xiph.org/vorbis/doc/v-comment.html>`_.
+    """
+
+    def __init__(
+        self, bytestream: bytes | None = None, /, *, ignore_duplicates: bool = False
+    ) -> None:
+        """
+        Parameters
+        ----------
+        bytestream : bytes, positional-only, optional
+            Bytestream containing a Vorbis comment metadata block.
+
+        ignore_duplicates : bool, keyword-only, default: :code:`False`
+            Specifies whether to ignore duplicate values in existing fields.
+        """
+
+        if isinstance(bytestream, bytes):
+            self._vendor = bytestream[
+                4 : (
+                    byte_offset := 4
+                    + int.from_bytes(bytestream[:4], byteorder="little")
+                )
+            ].decode()
+            self._n_fields = int.from_bytes(
+                bytestream[byte_offset : (byte_offset := byte_offset + 4)],
+                byteorder="little",
+            )
             self._fields = {}
-            for _ in range(self._n_fields):
-                field_length = int.from_bytes(data[byte_offset:byte_offset + 4], byteorder="little")
-                byte_offset += 4
-                field = data[byte_offset:byte_offset + field_length].decode()
-                byte_offset += field_length
-                key, value = field.split("=", 1)
-                if key in self._fields:
-                    if isinstance(self._fields[key], str):
-                        self._fields[key] = [self._fields[key]]
-                    self._fields[key].append(value)
-                else:
-                    self._fields[key] = value
-            # TODO: Validate for loop.
-            debug=True
-        elif isinstance(data, dict):
-            debug=True
+            if ignore_duplicates:
+                for _ in range(self._n_fields):
+                    field_length = int.from_bytes(
+                        bytestream[byte_offset : (byte_offset := byte_offset + 4)],
+                        byteorder="little",
+                    )
+                    field = bytestream[
+                        byte_offset : (byte_offset := byte_offset + field_length)
+                    ].decode()
+                    key, value = field.split("=", 1)
+                    if (key := key.upper()) in self._fields:
+                        self._fields[key][value] = None
+                    else:
+                        self._fields[key] = {value: None}
+                for key, value in self._fields.items():
+                    self._fields[key] = list(value.keys())
+            else:
+                for _ in range(self._n_fields):
+                    field_length = int.from_bytes(
+                        bytestream[byte_offset : (byte_offset := byte_offset + 4)],
+                        byteorder="little",
+                    )
+                    field = bytestream[
+                        byte_offset : (byte_offset := byte_offset + field_length)
+                    ].decode()
+                    key, value = field.split("=", 1)
+                    if (key := key.upper()) in self._fields:
+                        self._fields[key].append(value)
+                    else:
+                        self._fields[key] = [value]
+        elif bytestream is None:
+            self._vendor = None
+            self._n_fields = 0
+            self._fields = {}
         else:
-            raise ValueError("`data` must be either a bytes object or a dictionary.")
+            raise ValueError("If provided, `bytestream` must be a bytes object.")
+
+        self._ignore_duplicates = ignore_duplicates
+
+    def get(self):
+        pass
+
+    def set(self, **kwargs: Any) -> None:
+        """
+        Set track attributes.
+
+        .. note::
+
+           The Vorbis comment specification allows for arbitrary
+           case-insensitive field names consisting of only ASCII
+           characters 0x20 through 0x7D, excluding 0x3D (:code:`=`).
+           However, Python identifiers are case-sensitive, can contain
+           Unicode characters, and have restrictions like not containing
+           whitespace or starting with a digit.
+
+           To pass in fields with names that do not conform to Python
+           identifier rules, unpack a dictionary containing key–value
+           pairs.
+
+           All field names will have illegal characters replaced with
+           underscores and be converted to uppercase. It is possible
+           that two fields with different invalid names are treated as
+           the same field if their sanitized names are identical.
+
+        Parameters
+        ----------
+        **kwargs
+            Key–value pairs of track attributes.
+
+        Examples
+        --------
+        >>> vc = VorbisComment()
+        >>> vc.set(title="I Found U", artist=["Passion Pit", "Galantis"])
+        >>> vc.set(
+        ...     ALBUM="Church",
+        ...     ALBUMARTIST="Galantis"
+        ... )
+        >>> vc.set(
+        ...     compilation=False,
+        ...     date=datetime(2019, 5, 15, 12, 0, 0),
+        ...     tracknumber=9,
+        ...     tracktotal=14
+        ... )
+        >>> vc.set(**{"日本語版": True})
+        """
+
+        to_string = lambda value: (
+            value if isinstance(value, str)
+            else value.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(value, datetime)
+            else str(int(value)) if isinstance(value, bool)
+            else str(value) if isinstance(value, Number)
+            else value
+        )
+
+        if self._ignore_duplicates:
+            new_keys = set()
+            for key, value in kwargs.items():
+                if not isinstance(key, str):
+                    raise TypeError(f"Field name `{key}` is not a `str`.")
+                if (
+                    key := re.sub("[^\x20-\x3C\x3E-\x7E]", "_", key.upper())
+                ) not in self._fields:
+                    self._fields[key] = {}
+                    new_keys.add(key)
+                if isinstance(value := to_string(value), str):
+                    self._fields[key][value] = None
+                elif isinstance(value, Sequence):
+                    for item in value:
+                        if isinstance(item := to_string(item), str):
+                            self._fields[key][item] = None
+                        else:
+                            raise TypeError(
+                                f"The value `{item}` for field '{key}' has "
+                                f"unsupported type `{type(item).__name__}`."
+                            )
+                else:
+                    raise TypeError(
+                        f"The value `{value}` for field '{key}' has "
+                        f"unsupported type `{type(value).__name__}`."
+                    )
+            for key in new_keys:
+                self._fields[key] = list(self._fields[key].keys())
+        else:
+            for key, value in kwargs.items():
+                if not isinstance(key, str):
+                    raise TypeError("Field names must be strings.")
+                if (
+                    key := re.sub("[^\x20-\x3C\x3E-\x7E]", "_", key.upper())
+                ) not in self._fields:
+                    self._fields[key] = []
+                if isinstance(value := to_string(value), str):
+                    self._fields[key].append(value)
+                elif isinstance(value, Sequence):
+                    for item in value:
+                        if isinstance(item := to_string(item), str):
+                            self._fields[key].append(item)
+                        else:
+                            raise TypeError(
+                                f"The value `{item}` for field '{key}' has "
+                                f"unsupported type `{type(item).__name__}`."
+                            )
+                else:
+                    raise TypeError(
+                        f"The value `{value}` for field '{key}' has "
+                        f"unsupported type `{type(value).__name__}`."
+                    )
+
+    @property
+    def album(self) -> list[str] | None:
+        """
+        Name of the album or collection containing the track.
+        """
+
+        return self._fields.get("ALBUM")
+
+    @property
+    def album_artist(self) -> list[str] | None:
+        """
+        Main artist(s) of the entire album.
+        """
+
+        return self._fields.get("ALBUMARTIST")
+
+    @property
+    def artist(self) -> list[str] | None:
+        """
+        Artist(s) responsible for the track (e.g., the performing band
+        or singer in popular music, the composer for classical music, or
+        the author of the original text in audiobooks).
+        """
+
+        return self._fields.get("ARTIST")
+
+    @property
+    def comment(self) -> list[str] | None:
+        """
+        Free-form comment(s) about the track.
+        """
+
+        return self._fields.get("COMMENT")
+
+    @property
+    def composer(self) -> list[str] | None:
+        """
+        Composer(s) who wrote the track.
+        """
+
+        return self._fields.get("COMPOSER")
+
+    @property
+    def contact(self) -> list[str] | None:
+        """
+        Contact information for the creators or distributors of the
+        track.
+        """
+
+        return self._fields.get("CONTACT")
+
+    @property
+    def copyright(self) -> list[str] | None:
+        """
+        Copyright attribution for the track or album.
+        """
+
+        return self._fields.get("COPYRIGHT")
+
+    @property
+    def date(self) -> list[str] | None:
+        """
+        Track release date.
+        """
+
+        return self._fields.get("DATE", self._fields.get("YEAR"))
+
+    @property
+    def description(self) -> list[str] | None:
+        """
+        General description of the track or album.
+        """
+
+        return self._fields.get("DESCRIPTION")
+
+    @property
+    def disc_number(self) -> list[str] | None:
+        """
+        Disc number within a multi-disc album.
+        """
+
+        return self._fields.get("DISCNUMBER")
+
+    @property
+    def disc_total(self) -> list[str] | None:
+        """
+        Total number of discs in the album set.
+        """
+
+        return self._fields.get("DISCTOTAL")
+
+    @property
+    def encoder(self) -> list[str] | None:
+        """
+        Software or hardware used to encode the track.
+        """
+
+        return self._fields.get("ENCODER")
+
+    @property
+    def genre(self) -> list[str] | None:
+        """
+        Genre(s) of the track.
+        """
+
+        return self._fields.get("GENRE")
+
+    @property
+    def isrc(self) -> list[str] | None:
+        """
+        International Standard Recording Code (ISRC) for the particular
+        recording in the track.
+        """
+
+        return self._fields.get("ISRC")
+
+    @property
+    def license(self) -> list[str] | None:
+        """
+        License information for the track or album.
+        """
+
+        return self._fields.get("LICENSE")
+
+    @property
+    def location(self) -> list[str] | None:
+        """
+        Location where the recording was made.
+        """
+
+        return self._fields.get("LOCATION")
+
+    @property
+    def organization(self) -> list[str] | None:
+        """
+        Publisher or record label distributing the track.
+        """
+
+        return self._fields.get("ORGANIZATION")
+
+    @property
+    def performer(self) -> list[str] | None:
+        """
+        Performer(s) responsible for the track (e.g., the conductor,
+        orchestra, and/or soloists in classical music, or the narrator
+        in audiobooks).
+        """
+
+        return self._fields.get("PERFORMER")
+
+    @property
+    def title(self) -> list[str] | None:
+        """
+        Title of the track.
+        """
+
+        return self._fields.get("TITLE")
+
+    @property
+    def track_number(self) -> list[str] | None:
+        """
+        Track number within the album.
+        """
+
+        return self._fields.get("TRACKNUMBER")
+
+    @property
+    def track_total(self) -> list[str] | None:
+        """
+        Total number of tracks in the album.
+        """
+
+        return self._fields.get("TRACKTOTAL")
+
+    @property
+    def version(self) -> list[str] | None:
+        """
+        Version of the track (e.g., remix information).
+        """
+
+        return self._fields.get("VERSION")
 
 
 class Audio:
+
     def __init__(
         self,
         file_path: str | Path,
@@ -220,7 +562,6 @@ class FLACAudio(Audio):
                         self._metadata["VORBIS_COMMENT"] = VorbisComment(
                             file.read(block_size)
                         )
-                        debug=True
                     case 5:
                         block_data = file.read(block_size)
                         if tags_only:
@@ -440,9 +781,7 @@ class FLACAudio(Audio):
                         picture = APICFrame(
                             picture_type=int.from_bytes(block_data[:4]),
                             mime_type=block_data[
-                                8 : (
-                                    byte_offset := 8 + int.from_bytes(block_data[4:8])
-                                )
+                                8 : (byte_offset := 8 + int.from_bytes(block_data[4:8]))
                             ].decode(),
                             description=block_data[
                                 byte_offset
@@ -498,24 +837,10 @@ class FLACAudio(Audio):
                         )
                         file.read(block_size)
 
-        debug=True
+        debug = True
 
     @property
     def metadata(self):
         if not hasattr(self, "_metadata"):
-            self._load()
+            self.load()
         return self._metadata
-
-
-if __name__ == "__main__":
-
-    import os
-
-    os.chdir("/mnt/c/Users/Benjamin/Documents/GitHub")
-
-    # file = "06 Wrecking Ball.flac"
-    file = "/mnt/c/Users/Benjamin/Documents/GitHub/caesura/tests/data/flac-test-files/subset/55 - file 48-53 combined.flac"
-    flac = FLACAudio(file, tags_only=True)
-    data = flac.load()
-
-    debug = True
