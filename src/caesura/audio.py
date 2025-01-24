@@ -134,12 +134,69 @@ class VorbisComment:
 
         self._ignore_duplicates = ignore_duplicates
 
-    def get(self):
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        """
+        Normalize a field name to conform to the Vorbis comment
+        specification.
+
+        Parameters
+        ----------
+        key : `str`
+            Field name to normalize.
+
+        Returns
+        -------
+        key : `str`
+            Normalized field name.
+        """
+
+        return re.sub("[^\x20-\x3C\x3E-\x7E]", "_", key.upper())
+
+    @staticmethod
+    def _to_string(value: Any) -> Any:
+        """
+        Attempt to convert an arbitrary value to a `str`.
+
+        Parameters
+        ----------
+        value : Any
+            Value to convert.
+
+        Returns
+        -------
+        value : Any
+            String representation of the value if it has a supported
+            type, and the original value otherwise.
+        """
+
+        return (
+            value if isinstance(value, str)
+            else value.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(value, datetime)
+            else str(int(value)) if isinstance(value, bool)
+            else str(value) if isinstance(value, Number)
+            else value
+        )
+
+    def get(
+        self,
+        fields: str | Sequence[str],
+        /,
+        delimiter: str | tuple[str] = (", ", " & "),
+    ) -> str | list[str] | dict[str, str | list[str]]:
+        """
+        Get track attribute(s).
+
+        Parameters
+        ----------
+        """
+
         pass
+
 
     def set(self, **kwargs: Any) -> None:
         """
-        Set track attributes.
+        Set track attribute(s).
 
         .. note::
 
@@ -181,29 +238,19 @@ class VorbisComment:
         >>> vc.set(**{"日本語版": True})
         """
 
-        to_string = lambda value: (
-            value if isinstance(value, str)
-            else value.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(value, datetime)
-            else str(int(value)) if isinstance(value, bool)
-            else str(value) if isinstance(value, Number)
-            else value
-        )
-
         if self._ignore_duplicates:
             new_keys = set()
             for key, value in kwargs.items():
                 if not isinstance(key, str):
                     raise TypeError(f"Field name `{key}` is not a `str`.")
-                if (
-                    key := re.sub("[^\x20-\x3C\x3E-\x7E]", "_", key.upper())
-                ) not in self._fields:
+                if (key := self._normalize_key(key)) not in self._fields:
                     self._fields[key] = {}
                     new_keys.add(key)
-                if isinstance(value := to_string(value), str):
+                if isinstance(value := self._to_string(value), str):
                     self._fields[key][value] = None
                 elif isinstance(value, Sequence):
                     for item in value:
-                        if isinstance(item := to_string(item), str):
+                        if isinstance(item := self._to_string(item), str):
                             self._fields[key][item] = None
                         else:
                             raise TypeError(
@@ -221,15 +268,13 @@ class VorbisComment:
             for key, value in kwargs.items():
                 if not isinstance(key, str):
                     raise TypeError("Field names must be strings.")
-                if (
-                    key := re.sub("[^\x20-\x3C\x3E-\x7E]", "_", key.upper())
-                ) not in self._fields:
+                if (key := self._normalize_key(key)) not in self._fields:
                     self._fields[key] = []
-                if isinstance(value := to_string(value), str):
+                if isinstance(value := self._to_string(value), str):
                     self._fields[key].append(value)
                 elif isinstance(value, Sequence):
                     for item in value:
-                        if isinstance(item := to_string(item), str):
+                        if isinstance(item := self._to_string(item), str):
                             self._fields[key].append(item)
                         else:
                             raise TypeError(
@@ -844,3 +889,31 @@ class FLACAudio(Audio):
         if not hasattr(self, "_metadata"):
             self.load()
         return self._metadata
+
+
+if __name__ == "__main__":
+
+    vc = VorbisComment()
+    vc.set(title="I Found U", artist=["Passion Pit", "Galantis"])
+    vc.set(
+        ALBUM="Church",
+        ALBUMARTIST="Galantis"
+    )
+    vc.set(
+        compilation=False,
+        date=datetime(2019, 5, 15, 12, 0, 0),
+        tracknumber=9,
+        tracktotal=14
+    )
+    vc.set(**{"日本語版": True})
+
+    import os
+
+    os.chdir("/mnt/c/Users/Benjamin/Documents/GitHub")
+
+    # file = "06 Wrecking Ball.flac"
+    file = "/mnt/c/Users/Benjamin/Documents/GitHub/caesura/tests/data/flac-test-files/subset/55 - file 48-53 combined.flac"
+    flac = FLACAudio(file, tags_only=True)
+    data = flac.load()
+
+    debug = True
